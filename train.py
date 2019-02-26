@@ -12,7 +12,13 @@ import torch.nn as nn
 from torch import optim
 import torch.nn.functional as F
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+import matplotlib.pyplot as plt
+plt.switch_backend('agg')
+import matplotlib.ticker as ticker
+import numpy as np
+
+#device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device('cuda:0')
 
 from dataset_loader import prepareData
 from model import EncoderRNN, DecoderRNN
@@ -22,25 +28,72 @@ EOS_token = 1
 
 dataset_dir = 'webnlg-dataset/webnlg_challenge_2017'
 
-print('Getting vocabulary from test dataset')
-vocab, _ = prepareData(dataset_dir, mode='dev', n_triples=1)
-print()
-print('Reading train dataset.')
-_, pairs = prepareData(dataset_dir, mode='train', n_triples=1)
+print('Reading train dataset')
+vocab, train_pairs = prepareData(dataset_dir, mode='train', n_triples=1)
+print('Reading test dataset.')
+_, test_pairs = prepareData(dataset_dir, mode='dev', n_triples=1)
 
-for pair in pairs:
+for pair in test_pairs:
     vocab.addSentence(pair[0])
     vocab.addSentence(pair[1])
-        
-def indexesFromSentence(vocab, sentence):
-    return [vocab.word2index[word] for word in sentence.split(' ')]
 
+print("Writing vocabs into a text file.")
+f= open("vocab.txt","w+")
+for i in range(vocab.n_words):
+    f.write(vocab.index2word[i])
+    f.write('\n')
+
+import io
+
+def load_embeddings(fname):
+    fin = io.open(fname, 'r', encoding='utf-8', newline='\n', errors='ignore')
+    n, d = map(int, fin.readline().split())
+    data = {}
+    for line in fin:
+        tokens = line.rstrip().split(' ')
+        word = tokens[0]
+        vector = tokens[1:]
+        vector = [float(v) for v in vector]
+        data[word] = vector
+    return data
+
+def prepare_embeddings_array(vocab, embeddings):
+    embeddings_array = np.random.uniform(-0.25, 0.25, (vocab.n_words, len(embeddings['a'])))
+    for idx in range(vocab.n_words):
+        word = vocab.index2word[idx]
+        if word in embeddings:
+            embeddings_array[idx] = embeddings[word]
+    return torch.FloatTensor(embeddings_array)
+
+print("Reading word embeddings.")
+embeddings = load_embeddings('cc.en.300.vec')
+embeddings_array = prepare_embeddings_array(vocab, embeddings)
+
+print("Writing vocabs that don't have an embedding vector into a text file.")
+f= open("vocab_no_embedding.txt","w+")
+for i in range(vocab.n_words):
+    if vocab.index2word[i] not in embeddings:
+        f.write(vocab.index2word[i])
+        f.write('\n')
+del embeddings
+
+
+def showPlot(points):
+    plt.figure()
+    fig, ax = plt.subplots()
+    # this locator puts ticks at regular intervals
+    loc = ticker.MultipleLocator(base=0.2)
+    ax.yaxis.set_major_locator(loc)
+    plt.plot(points)
+    plt.savefig("loss.png")
+ 
+def indexesFromSentence(vocab, sentence):
+    return [vocab.word2index[word] for word in sentence]
 
 def tensorFromSentence(vocab, sentence):
     indexes = indexesFromSentence(vocab, sentence)
     indexes.append(EOS_token)
     return torch.tensor(indexes, dtype=torch.long, device=device).view(-1, 1)
-
 
 def tensorsFromPair(vocab, pair):
     input_tensor = tensorFromSentence(vocab, pair[0])
@@ -50,12 +103,10 @@ def tensorsFromPair(vocab, pair):
 import time
 import math
 
-
 def asMinutes(s):
     m = math.floor(s / 60)
     s -= m * 60
     return '%dm %ds' % (m, s)
-
 
 def timeSince(since, percent):
     now = time.time()
@@ -67,22 +118,24 @@ def timeSince(since, percent):
 
 teacher_forcing_ratio = 0.5
 
-import matplotlib.pyplot as plt
-plt.switch_backend('agg')
-import matplotlib.ticker as ticker
-import numpy as np
+def cal_accuracy(encoder, decoder, pairs):
+    acc = 0
+
+    for pair in pairs:
+
+        triple = pair[0]
+        target_sentence = pair[1]
+        target_sentence = ' '.join(target_sentence)
+        predicted_sentence = evaluate_sentence(encoder, decoder, triple, vocab)
+        predicted_sentence = ' '.join(predicted_sentence)
+       
+        bleu_score = bleu.corpus_bleu([predicted_sentence], [[target_sentence]])[0][0]*100
+        acc += bleu_score
+            
+    return (acc / float(len(pairs)))
 
 
-def showPlot(points):
-    plt.figure()
-    fig, ax = plt.subplots()
-    # this locator puts ticks at regular intervals
-    loc = ticker.MultipleLocator(base=0.2)
-    ax.yaxis.set_major_locator(loc)
-    plt.plot(points)
-    plt.savefig("temp.png")
-    
-def train(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion):
+def train_pair(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion):
     encoder_hidden = encoder.initHidden()
 
     encoder_optimizer.zero_grad()
@@ -131,45 +184,39 @@ def train(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, deco
     return loss.item() / target_length
 
 
-def trainIters(encoder, decoder, n_iters, print_every=1000, plot_every=100, learning_rate=0.0002):
+def train(encoder, decoder, n_epochs, learning_rate=0.01):
     start = time.time()
-    plot_losses = []
-    print_loss_total = 0  # Reset every print_every
-    plot_loss_total = 0  # Reset every plot_every
+    loss_list = [] 
 
     encoder_optimizer = optim.Adam(encoder.parameters(), lr=learning_rate)
     decoder_optimizer = optim.Adam(decoder.parameters(), lr=learning_rate)
-    training_pairs = [tensorsFromPair(vocab, random.choice(pairs))
-                      for i in range(n_iters)]
+   
     criterion = nn.NLLLoss()
 
-    for iter in range(1, n_iters + 1):
-        training_pair = training_pairs[iter - 1]
-        input_tensor = training_pair[0]
-        target_tensor = training_pair[1]
+    for epo in range(1, n_epochs+1):
+        
+        total_loss = 0
+        for pair in train_pairs:
 
-        loss = train(input_tensor, target_tensor, encoder,
-                     decoder, encoder_optimizer, decoder_optimizer, criterion)
-        print_loss_total += loss
-        plot_loss_total += loss
+            pair = tensorsFromPair(vocab, pair)
+            input_tensor = pair[0]
+            target_tensor = pair[1]
 
-        if iter % print_every == 0:
-            print_loss_avg = print_loss_total / print_every
-            print_loss_total = 0
-            print('%s (%d %d%%) %.4f' % (timeSince(start, iter / n_iters),
-                                         iter, iter / n_iters * 100, print_loss_avg))
+            loss = train_pair(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion)
+            total_loss += loss
+            loss_list.append(loss)
+            
+        avg_loss = total_loss / len(train_pairs)
+        
+        print('%s (%d %d%%) Loss : %.4f' % (timeSince(start, epo / n_epochs),
+                     epo, epo / n_epochs * 100, avg_loss))
 
-        if iter % plot_every == 0:
-            plot_loss_avg = plot_loss_total / plot_every
-            plot_losses.append(plot_loss_avg)
-            plot_loss_total = 0
-    
     torch.save(encoder.state_dict(), 'encoder.pt')
     torch.save(decoder.state_dict(), 'decoder.pt')
-    showPlot(plot_losses)
+    showPlot(loss_list)
 
-hidden_size = 512
-encoder = EncoderRNN(vocab.n_words, hidden_size).to(device)
+hidden_size = 300
+encoder = EncoderRNN(vocab.n_words, hidden_size, embeddings_array).to(device)
 decoder = DecoderRNN(hidden_size, vocab.n_words).to(device)
 
-trainIters(encoder, decoder, 75000, print_every=5000)
+train(encoder, decoder, n_epochs=25)

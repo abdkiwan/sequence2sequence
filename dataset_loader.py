@@ -1,17 +1,40 @@
-
+# -*- coding: utf-8 -*-
 
 import os
 import re
 from bs4 import BeautifulSoup
+import nltk
 
 SOS_token = 0
 EOS_token = 1
 
-# Lowercase, trim, and remove non-letter characters
-def normalizeString(s):
-    s = re.sub(r"([.!?])", r" \1", s)
-    s = re.sub(r"[^a-zA-Z.!?]+", r" ", s)
-    return s
+def preprocess_triple(triple):
+    # Removing camel casing
+    new_triple = []
+    for entity in triple:
+        entity = entity.lower()
+        entity = entity.strip()
+        entity = entity.replace('á', 'a')
+        entity = entity.replace('ä', 'a')
+        entity = entity.replace('ò', 'o')
+        entity = entity.replace('ó', 'o')
+        entity = entity.replace('ö', 'o')
+        entity = entity.replace('ü', 'u') 
+        # Removing non-letter and non-digit characters
+        entity = re.sub(r"[^a-zA-Z1234567890.!?]+", r" ", entity)
+        # Removing camel casing
+        entity = re.sub("([a-z])([A-Z])","\g<1> \g<2>",entity)
+        entity = entity.split(' ')
+        for e in entity:
+            if not e.isspace() and e: new_triple.append(e)
+
+    return new_triple
+
+def preprocess_sentence(sentence):
+    sentence = [s.strip() for s in sentence]
+    sentence = [s.lower() for s in sentence]
+
+    return sentence
 
 def parse_xml(file_dir):
 
@@ -20,10 +43,12 @@ def parse_xml(file_dir):
     soup = BeautifulSoup(handler, 'lxml')
     entries = soup.findAll('entry')
     for entry in entries:
-        triple = ''.join(entry.find('mtriple').text.split('|'))
-        
+        triple = entry.find('mtriple').text.split('|')
+        triple = preprocess_triple(triple)
+       
         for sentence in entry.findAll('lex'):
-            sentence = sentence.text
+            sentence = nltk.word_tokenize(sentence.text.lower())
+            sentence = preprocess_sentence(sentence)
             pairs.append((triple, sentence))
     
     return pairs
@@ -36,7 +61,7 @@ class Vocab:
         self.n_words = 2  # Count SOS and EOS
 
     def addSentence(self, sentence):
-        for word in sentence.split(' '):
+        for word in sentence:
             self.addWord(word)
 
     def addWord(self, word):

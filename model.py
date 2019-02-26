@@ -14,12 +14,15 @@ import torch.nn.functional as F
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class EncoderRNN(nn.Module):
-    def __init__(self, input_size, hidden_size):
+    def __init__(self, input_size, hidden_size, embeddings_array):
         super(EncoderRNN, self).__init__()
         self.hidden_size = hidden_size
     
         self.dropout = nn.Dropout(0.5)
-        self.embedding = nn.Embedding(input_size, hidden_size)
+        #self.embedding = nn.Embedding(input_size, hidden_size)
+        #self.embedding.weight.data.copy_(torch.from_numpy(embeddings_array))
+        self.embedding = nn.Embedding.from_pretrained(embeddings_array)
+        
         self.gru = nn.GRU(hidden_size, hidden_size)
 
     def forward(self, input, hidden):
